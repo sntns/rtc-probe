@@ -722,6 +722,53 @@ mod tests {
             .all(|(_, o)| matches!(o, Err(BusError::Absent))));
     }
 
+    /// A PCF2127 module on a Raspberry Pi 3 (bus 1, 0x51), its 28 registers
+    /// as read at 10:11:21 UTC: Control_1-3, the time, alarms disabled
+    /// (bit 7), CLKOUT, watchdog, time stamps, aging offset 8.
+    const REAL_PCF2127: [u8; 28] = [
+        0x00, 0x04, 0x00, 0x21, 0x11, 0x09, 0x27, 0x05, 0x11, 0x26, 0x80, 0x80, 0x80, 0x80, 0x80,
+        0x20, 0xc2, 0x00, 0x88, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_real_pcf2127_is_identified() {
+        let chip = FakeChip {
+            registers: REAL_PCF2127.to_vec(),
+            wrap_to: 0,
+            seconds: Some((0x03, 0x7f)),
+            running: true,
+        };
+
+        let Finding::Chip(found) = probe_one(chip, 0x51) else {
+            panic!()
+        };
+
+        assert_eq!(found.chip, "PCF2127/PCF2129");
+        assert_eq!(found.confidence, Confidence::Certain);
+        assert_eq!(found.oscillator, Oscillator::Running);
+        assert_eq!(found.wrap, Some(28));
+    }
+
+    #[test]
+    fn a_real_pcf2127_read_one_register_late_is_no_rtc() {
+        // What a combined transfer (repeated START) returns from it: the
+        // registers from 0x01. Nothing known matches it, rather than a wrong
+        // chip.
+        let mut late = REAL_PCF2127.to_vec();
+        late.rotate_left(1);
+        let chip = FakeChip {
+            registers: late,
+            wrap_to: 0,
+            seconds: Some((0x02, 0x7f)),
+            running: true,
+        };
+
+        assert!(matches!(
+            probe_one(chip, 0x51),
+            Finding::Unknown { wrap: Some(28), .. }
+        ));
+    }
+
     /// A bus shared with the wait closure, which ticks it.
     struct Ticking<'a>(&'a std::cell::RefCell<FakeBus>);
 

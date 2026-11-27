@@ -4,6 +4,11 @@
 //!
 //! `I2C_RDWR` reads a device whether a kernel driver is bound to it or not:
 //! a chip already handled by a driver can still be identified.
+//!
+//! The register pointer is written in a transfer of its own, ended by a
+//! STOP, before the read: a PCF2127 answers a combined transfer (repeated
+//! START) from the register after the one written, as its Linux driver
+//! knows (it writes and reads in two transfers too).
 
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -53,43 +58,60 @@ impl LinuxI2c {
     }
 }
 
+impl LinuxI2c {
+    /// One message, in a transfer of its own.
+    fn transfer(&self, msg: &mut I2cMsg) -> io::Result<()> {
+        let mut data = I2cRdwrData {
+            msgs: msg,
+            nmsgs: 1,
+        };
+        // SAFETY: I2C_RDWR reads `nmsgs` `struct i2c_msg` from `msgs`, and
+        // writes at most `len` bytes to a read message's `buf`: both point
+        // to live buffers of those lengths for the whole call.
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), I2C_RDWR as _, &mut data) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+/// Whether `error`, from the first message to an address, means that
+/// nothing acknowledged it: i2c-bcm2835 reports EREMOTEIO or EIO, others
+/// ENXIO.
+fn not_acknowledged(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENXIO | libc::EREMOTEIO | libc::EIO)
+    )
+}
+
 impl I2cBus for LinuxI2c {
     fn read(&mut self, address: u8, register: u8, buf: &mut [u8]) -> Result<(), BusError> {
         let len = u16::try_from(buf.len())
             .map_err(|_| BusError::Io(io::Error::from(io::ErrorKind::InvalidInput)))?;
         let mut pointer = register;
-        let mut msgs = [
-            I2cMsg {
-                addr: u16::from(address),
-                flags: 0,
-                len: 1,
-                buf: &mut pointer,
-            },
-            I2cMsg {
-                addr: u16::from(address),
-                flags: I2C_M_RD,
-                len,
-                buf: buf.as_mut_ptr(),
-            },
-        ];
-        let mut data = I2cRdwrData {
-            msgs: msgs.as_mut_ptr(),
-            nmsgs: 2,
-        };
-        // SAFETY: I2C_RDWR reads `nmsgs` `struct i2c_msg` from `msgs`, and
-        // writes at most `len` bytes to each read message's `buf`: both
-        // point to live buffers of those lengths for the whole call.
-        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), I2C_RDWR as _, &mut data) };
-        if ret < 0 {
-            let error = io::Error::last_os_error();
-            return Err(match error.raw_os_error() {
-                // What the adapters report when the address is not
-                // acknowledged (i2c-bcm2835: EREMOTEIO; others ENXIO).
-                Some(libc::ENXIO | libc::EREMOTEIO) => BusError::Absent,
-                _ => BusError::Io(error),
-            });
-        }
-        Ok(())
+        self.transfer(&mut I2cMsg {
+            addr: u16::from(address),
+            flags: 0,
+            len: 1,
+            buf: &mut pointer,
+        })
+        .map_err(|e| {
+            if not_acknowledged(&e) {
+                BusError::Absent
+            } else {
+                BusError::Io(e)
+            }
+        })?;
+        // The device acknowledged its address: any failure now is one.
+        self.transfer(&mut I2cMsg {
+            addr: u16::from(address),
+            flags: I2C_M_RD,
+            len,
+            buf: buf.as_mut_ptr(),
+        })
+        .map_err(BusError::Io)
     }
 }
 
@@ -429,6 +451,16 @@ mod bind_tests {
             .unwrap_err();
 
         assert!(matches!(error, BindError::NewDevice(_)));
+    }
+
+    #[test]
+    fn no_acknowledgement_is_told_from_a_bus_error() {
+        let errno = std::io::Error::from_raw_os_error;
+        assert!(not_acknowledged(&errno(libc::ENXIO)));
+        assert!(not_acknowledged(&errno(libc::EREMOTEIO)));
+        assert!(not_acknowledged(&errno(libc::EIO)));
+        assert!(!not_acknowledged(&errno(libc::ETIMEDOUT)));
+        assert!(!not_acknowledged(&errno(libc::EAGAIN)));
     }
 
     #[test]

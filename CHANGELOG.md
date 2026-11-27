@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Validated on a PCF2127 module on a Raspberry Pi 3.
+
+- **Fixed:** the register pointer is written in a transfer of its own, then the registers are read in another. A PCF2127 answers a combined transfer (repeated START) from the register after the one written, so 0.1.0 could not identify it.
+- **Fixed:** on a Raspberry Pi (i2c-bcm2835), an address where nothing answers fails with EIO. 0.1.0 reported it as a bus error and exited with 2.
+- **Tests:** the registers of a real PCF2127, read both ways.
+
 ## 0.1.0 - 2026-11-27
 
 First release.
