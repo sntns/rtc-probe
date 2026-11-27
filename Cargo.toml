@@ -1,0 +1,38 @@
+[package]
+name = "rtc-probe"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Identify the real-time clock chip on an I2C bus with read-only reads, and bind its Linux driver (Raspberry Pi and other boards)"
+repository = "https://github.com/sntns/rtc-probe"
+homepage = "https://github.com/sntns/rtc-probe"
+license = "MIT OR Apache-2.0"
+keywords = ["rtc", "i2c", "raspberry-pi", "linux", "embedded"]
+categories = ["embedded", "hardware-support", "command-line-utilities"]
+readme = "README.md"
+
+[dependencies]
+libc = "0.2"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+# Drives `cargo release` (see .github/workflows/release.yml).
+[package.metadata.release]
+publish = true
+push = true
+allow-branch = ["main"]
+pre-release-commit-message = "chore: release v{{version}}"
+tag-name = "v{{version}}"
+tag-message = "v{{version}}"
+pre-release-replacements = [
+    { file = "CHANGELOG.md", search = "## Unreleased", replace = "## Unreleased\n\n## {{version}} - {{date}}", exactly = 1 },
+]
+
+# Small static binaries for initramfs use.
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1
+panic = "abort"
+strip = true
