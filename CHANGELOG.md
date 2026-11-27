@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.3 - 2026-11-27
+
 Validated, from a Raspberry Pi's initramfs, on a PCF2127 and on DS1307 modules, with and without a battery.
 
 - **Fixed:** a chip that flags its time as invalid (oscillator stopped, battery out, never set) was not identified when its time registers held garbage. A PCF2127 after a power cut without a battery has hours 0x0b, day and month 0. The time's BCD ranges are now checked only when the chip does not flag its time; a flagged chip needs its documented register count.

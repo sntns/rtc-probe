@@ -1,6 +1,6 @@
 [package]
 name = "rtc-probe"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.75"
 description = "Identify the real-time clock chip on an I2C bus with read-only reads, and bind its Linux driver (Raspberry Pi and other boards)"
