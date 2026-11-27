@@ -255,9 +255,16 @@ pub fn matches(
 
 /// What `observation` holds, among the chips known.
 pub fn identify(observation: &Observation) -> Finding {
-    let wraps = crate::chips::wraps();
+    identify_among(observation, CHIPS)
+}
+
+/// What `observation` holds, among `chips`.
+pub fn identify_among(observation: &Observation, chips: &[Chip]) -> Finding {
+    let mut wraps: Vec<usize> = chips.iter().filter_map(|c| c.wrap).collect();
+    wraps.sort_unstable();
+    wraps.dedup();
     let wrap = wrap_length(&observation.first, &observation.second, &wraps);
-    let mut candidates: Vec<Identification> = CHIPS
+    let mut candidates: Vec<Identification> = chips
         .iter()
         .filter_map(|chip| matches(chip, observation, wrap))
         .collect();
@@ -498,6 +505,221 @@ mod tests {
             })
             .collect();
         assert_eq!(chips, ["PCF2127/PCF2129", "DS3231"]);
+    }
+
+    /// A chip for the tests: `wrap` registers, seconds at 0x00, no check.
+    fn synthetic(name: &'static str, wrap: Option<usize>, confirmed: bool) -> Chip {
+        Chip {
+            name,
+            address: 0x68,
+            device: "synthetic",
+            module: "rtc-synthetic",
+            wrap,
+            wrap_confirmed: confirmed,
+            seconds: (0x00, 0x7f),
+            fraction: None,
+            checks: &[],
+            integrity: &[],
+        }
+    }
+
+    /// Two reads of a `wrap`-register chip, its seconds at 0x00 ticking
+    /// (or not), the rest pseudo-random.
+    fn observation(wrap: usize, ticking: bool) -> Observation {
+        let mut chip = FakeChip::new(wrap, 0);
+        for (i, r) in chip.registers.iter_mut().enumerate() {
+            *r = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        chip.registers[0] = 0x21;
+        chip.seconds = Some((0x00, 0x7f));
+        chip.running = ticking;
+        let mut bus = FakeBus::default().with(0x68, chip);
+        let mut first = vec![0; READ_LENGTH];
+        bus.read(0x68, 0, &mut first).unwrap();
+        bus.tick();
+        let mut second = vec![0; READ_LENGTH];
+        bus.read(0x68, 0, &mut second).unwrap();
+        Observation {
+            address: 0x68,
+            first,
+            second,
+        }
+    }
+
+    #[test]
+    fn a_register_changing_during_the_read_does_not_hide_the_wrap() {
+        // Hundredths at 0x00 change at every byte read; seconds at 0x01
+        // roll over between the first and the second repeat.
+        let period = 48;
+        let mut first: Vec<u8> = (0..READ_LENGTH)
+            .map(|i| (i % period) as u8 * 3 + 1)
+            .collect();
+        for (n, i) in (0..READ_LENGTH).step_by(period).enumerate() {
+            first[i] = n as u8;
+        }
+        first[period + 1] = 0x99;
+        let mut second = first.clone();
+        second[0] = 0x50;
+        second[1] = 0x42;
+        assert_eq!(wrap_length(&first, &second, &[11, 16, 48, 64]), Some(48));
+    }
+
+    #[test]
+    fn a_register_that_differs_without_changing_breaks_the_wrap() {
+        let period = 28;
+        let mut first: Vec<u8> = (0..READ_LENGTH)
+            .map(|i| (i % period) as u8 * 5 + 2)
+            .collect();
+        first[period + 7] = 0xee;
+        let second = first.clone();
+        assert_eq!(wrap_length(&first, &second, &[28, 64]), None);
+    }
+
+    #[test]
+    fn many_changing_registers_are_no_wrap() {
+        // A device whose registers all change (a sensor) does not wrap.
+        let first: Vec<u8> = (0..READ_LENGTH).map(|i| (i * 7 % 251) as u8).collect();
+        let second: Vec<u8> = first.iter().map(|b| b.wrapping_add(1)).collect();
+        assert_eq!(wrap_length(&first, &second, &[11, 16, 19, 28]), None);
+    }
+
+    #[test]
+    fn the_wrap_seen_rules_other_chips_out() {
+        let chips = [
+            synthetic("nineteen", Some(19), true),
+            synthetic("twenty-eight", Some(28), true),
+        ];
+
+        let Finding::Chip(found) = identify_among(&observation(28, true), &chips) else {
+            panic!()
+        };
+
+        assert_eq!(found.chip, "twenty-eight");
+        assert_eq!(found.wrap, Some(28));
+    }
+
+    #[test]
+    fn a_documented_wrap_beats_an_undocumented_one() {
+        let chips = [
+            synthetic("documented", Some(19), true),
+            synthetic("undocumented", None, false),
+        ];
+
+        let Finding::Chip(found) = identify_among(&observation(19, true), &chips) else {
+            panic!()
+        };
+
+        assert_eq!(found.chip, "documented");
+        assert_eq!(found.confidence, Confidence::Certain);
+    }
+
+    #[test]
+    fn an_undocumented_chip_that_does_not_tick_is_unknown() {
+        let chips = [synthetic("undocumented", None, false)];
+
+        assert!(matches!(
+            identify_among(&observation(35, false), &chips),
+            Finding::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn a_documented_wrap_not_seen_rules_the_chip_out() {
+        let chips = [synthetic("nineteen", Some(19), true)];
+
+        assert!(matches!(
+            identify_among(&observation(35, true), &chips),
+            Finding::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn chips_that_match_as_well_are_ambiguous() {
+        let chips = [
+            synthetic("one", Some(19), true),
+            synthetic("other", Some(19), true),
+        ];
+
+        let Finding::Ambiguous { candidates, .. } = identify_among(&observation(19, true), &chips)
+        else {
+            panic!()
+        };
+
+        let names: Vec<&str> = candidates.iter().map(|c| c.chip).collect();
+        assert_eq!(names, ["one", "other"]);
+    }
+
+    #[test]
+    fn invalid_seconds_rule_a_chip_out() {
+        let chips = [synthetic("nineteen", Some(19), true)];
+        let mut seen = observation(19, true);
+        seen.first[0] = 0x7a;
+
+        assert!(matches!(
+            identify_among(&seen, &chips),
+            Finding::Unknown { .. }
+        ));
+    }
+
+    /// A bus failing at some addresses.
+    struct Failing {
+        bus: FakeBus,
+        failing: Vec<u8>,
+        /// Fails only from the n-th read on.
+        after: usize,
+        reads: usize,
+    }
+
+    impl I2cBus for Failing {
+        fn read(&mut self, address: u8, register: u8, buf: &mut [u8]) -> Result<(), BusError> {
+            self.reads += 1;
+            if self.failing.contains(&address) && self.reads > self.after {
+                return Err(BusError::Io(std::io::Error::from_raw_os_error(libc::EIO)));
+            }
+            self.bus.read(address, register, buf)
+        }
+    }
+
+    #[test]
+    fn an_address_failing_does_not_stop_the_others() {
+        let pcf = CHIPS.iter().find(|c| c.name == "PCF2127/PCF2129").unwrap();
+        let mut bus = Failing {
+            bus: FakeBus::default().with(0x51, registers_of(pcf, 2)),
+            failing: vec![0x68],
+            after: 0,
+            reads: 0,
+        };
+
+        let observations = observe(&mut bus, &[0x51, 0x68], || {});
+
+        assert!(observations[0].1.is_ok());
+        assert!(matches!(observations[1].1, Err(BusError::Io(_))));
+    }
+
+    #[test]
+    fn a_second_read_failing_is_reported() {
+        let pcf = CHIPS.iter().find(|c| c.name == "PCF2127/PCF2129").unwrap();
+        let mut bus = Failing {
+            bus: FakeBus::default().with(0x51, registers_of(pcf, 2)),
+            failing: vec![0x51],
+            after: 1,
+            reads: 0,
+        };
+
+        let observations = observe(&mut bus, &[0x51], || {});
+
+        assert!(matches!(observations[0].1, Err(BusError::Io(_))));
+    }
+
+    #[test]
+    fn nothing_answering_means_no_wait() {
+        let mut waited = false;
+        let observations = observe(&mut FakeBus::default(), &[0x51, 0x68], || waited = true);
+
+        assert!(!waited);
+        assert!(observations
+            .iter()
+            .all(|(_, o)| matches!(o, Err(BusError::Absent))));
     }
 
     /// A bus shared with the wait closure, which ticks it.

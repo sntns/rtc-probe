@@ -43,6 +43,17 @@ jobs:
       # What crates.io will get (release.yml publishes it).
       - run: cargo package --locked
 
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo llvm-cov --all-targets --locked --summary-only
+
   # The static binaries an initramfs takes, for the Raspberry Pi.
   cross:
     name: Build (${{ matrix.target }})

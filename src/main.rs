@@ -7,6 +7,7 @@ use rtc_probe::identify::Confidence;
 use rtc_probe::identify::Finding;
 use rtc_probe::identify::Identification;
 use rtc_probe::identify::Oscillator;
+use rtc_probe::linux::Bound;
 use rtc_probe::linux::LinuxI2c;
 use rtc_probe::linux::Sysfs;
 
@@ -92,32 +93,24 @@ fn modprobe(module: &str) {
 
 /// Binds the chip found, unless the kernel already has a device there.
 fn bind(sysfs: &Sysfs, found: &Identification) -> Result<String, String> {
-    let address = found.address;
-    if let Some(device) = sysfs.device(address) {
-        return match device.driver {
-            Some(driver) => Ok(format!("already bound: {} ({driver})", device.name)),
-            None => Err(format!(
-                "the kernel already declares `{}` there, with no driver bound (a device-tree node?): remove it to bind {}",
-                device.name, found.device
-            )),
-        };
+    match sysfs.bind(
+        found.device,
+        found.address,
+        || modprobe(found.module),
+        Duration::from_secs(2),
+    ) {
+        Ok(Bound::Already(device)) => Ok(format!(
+            "already bound: {} ({})",
+            device.name,
+            device.driver.unwrap_or_default()
+        )),
+        Ok(Bound::Bound(device)) => Ok(format!(
+            "bound: {} ({})",
+            device.name,
+            device.driver.unwrap_or_default()
+        )),
+        Err(e) => Err(format!("{} not bound: {e}", found.device)),
     }
-    modprobe(found.module);
-    sysfs
-        .new_device(found.device, address)
-        .map_err(|e| format!("new_device {} 0x{address:02x}: {e}", found.device))?;
-    for _ in 0..20 {
-        if let Some(device) = sysfs.device(address) {
-            if let Some(driver) = device.driver {
-                return Ok(format!("bound: {} ({driver})", device.name));
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err(format!(
-        "{} instantiated at 0x{address:02x}, but no driver bound to it",
-        found.device
-    ))
 }
 
 fn hex(bytes: &[u8]) -> String {

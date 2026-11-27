@@ -1,5 +1,4 @@
-//! What two reads of a register file tell: how long it is before a
-//! sequential read repeats itself, and which registers count seconds.
+//! BCD seconds, as RTC chips count them.
 
 /// A BCD byte's value, if it is valid BCD.
 pub fn bcd(value: u8) -> Option<u8> {
@@ -23,21 +22,6 @@ pub fn ticked(before: u8, after: u8, mask: u8) -> bool {
         }
         _ => false,
     }
-}
-
-/// The length after which a sequential read from register 0x00 repeats
-/// itself, if it does within `dump`: the chip's register count, when its
-/// pointer wraps to 0x00. A register file that repeats with a shorter
-/// period than `min` (a blank EEPROM: one byte over and over) gives none.
-pub fn wrap_length(dump: &[u8], min: usize) -> Option<usize> {
-    if dump.iter().all(|b| *b == dump[0]) {
-        return None;
-    }
-    (min..=dump.len() / 2).find(|&period| {
-        dump.iter()
-            .zip(&dump[period..])
-            .all(|(first, again)| first == again)
-    })
 }
 
 #[cfg(test)]
@@ -64,16 +48,9 @@ mod tests {
     }
 
     #[test]
-    fn a_register_file_repeats_after_its_length() {
-        let file: Vec<u8> = (0..19u8).collect();
-        let dump: Vec<u8> = file.iter().cycle().take(64).copied().collect();
-        assert_eq!(wrap_length(&dump, 8), Some(19));
-    }
-
-    #[test]
-    fn a_blank_or_unrepeated_dump_has_no_length() {
-        assert_eq!(wrap_length(&[0xff; 64], 8), None);
-        let dump: Vec<u8> = (0..64u8).collect();
-        assert_eq!(wrap_length(&dump, 8), None);
+    fn seconds_roll_over() {
+        assert_eq!(next_second(0), 1);
+        assert_eq!(next_second(58), 59);
+        assert_eq!(next_second(59), 0);
     }
 }

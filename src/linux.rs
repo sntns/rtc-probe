@@ -165,6 +165,79 @@ impl Sysfs {
     }
 }
 
+/// What binding a chip did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bound {
+    /// The kernel had already bound a driver there: left as is.
+    Already(KernelDevice),
+    /// Instantiated, and its driver bound.
+    Bound(KernelDevice),
+}
+
+/// Why a chip was not bound.
+#[derive(Debug)]
+pub enum BindError {
+    /// The kernel declares a device there with no driver bound (a
+    /// device-tree node whose driver failed): `new_device` can't replace it.
+    Declared(KernelDevice),
+    /// `new_device` failed.
+    NewDevice(io::Error),
+    /// Instantiated, but no driver bound in time.
+    NoDriver,
+}
+
+impl std::fmt::Display for BindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindError::Declared(device) => write!(
+                f,
+                "the kernel already declares `{}` there, with no driver bound (a device-tree node?): remove it",
+                device.name
+            ),
+            BindError::NewDevice(e) => write!(f, "new_device failed: {e}"),
+            BindError::NoDriver => f.write_str("instantiated, but no driver bound to it"),
+        }
+    }
+}
+
+impl std::error::Error for BindError {}
+
+impl Sysfs {
+    /// Binds `device` at `address`, unless the kernel already has a device
+    /// there: `load` loads its module first (without udev, nothing loads it
+    /// on `new_device`), then the driver is waited for up to `wait`.
+    pub fn bind(
+        &self,
+        device: &str,
+        address: u8,
+        load: impl FnOnce(),
+        wait: std::time::Duration,
+    ) -> Result<Bound, BindError> {
+        if let Some(existing) = self.device(address) {
+            return if existing.driver.is_some() {
+                Ok(Bound::Already(existing))
+            } else {
+                Err(BindError::Declared(existing))
+            };
+        }
+        load();
+        self.new_device(device, address)
+            .map_err(BindError::NewDevice)?;
+        let step = std::time::Duration::from_millis(50);
+        let mut waited = std::time::Duration::ZERO;
+        loop {
+            if let Some(bound) = self.device(address).filter(|d| d.driver.is_some()) {
+                return Ok(Bound::Bound(bound));
+            }
+            if waited >= wait {
+                return Err(BindError::NoDriver);
+            }
+            std::thread::sleep(step);
+            waited += step;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +283,156 @@ mod tests {
             "ds3231 0x68\n"
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    /// An empty sysfs with bus 1, removed when dropped.
+    struct Root(PathBuf);
+
+    impl Root {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "rtc-probe-{name}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("i2c-1")).unwrap();
+            Root(root)
+        }
+
+        /// The kernel instantiating `name` at `address`, with a driver
+        /// bound or not.
+        fn device(&self, address: u8, name: &str, driver: Option<&str>) {
+            let dir = self.0.join(format!("1-{address:04x}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("name"), format!("{name}\n")).unwrap();
+            if let Some(driver) = driver {
+                let target = self.0.join("drivers").join(driver);
+                std::fs::create_dir_all(&target).unwrap();
+                std::os::unix::fs::symlink(&target, dir.join("driver")).unwrap();
+            }
+        }
+
+        fn sysfs(&self) -> Sysfs {
+            Sysfs::with_root(&self.0, 1)
+        }
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_device_already_bound_is_left_alone() {
+        let root = Root::new("already");
+        root.device(0x51, "pcf2127", Some("rtc-pcf2127-i2c"));
+        let loaded = AtomicBool::new(false);
+
+        let bound = root
+            .sysfs()
+            .bind(
+                "pcf2129",
+                0x51,
+                || loaded.store(true, Ordering::SeqCst),
+                Duration::ZERO,
+            )
+            .unwrap();
+
+        assert!(matches!(bound, Bound::Already(d) if d.name == "pcf2127"));
+        assert!(!loaded.load(Ordering::SeqCst));
+        assert!(!root.0.join("i2c-1/new_device").exists());
+    }
+
+    #[test]
+    fn a_device_declared_without_a_driver_is_not_replaced() {
+        let root = Root::new("declared");
+        root.device(0x68, "ds1307", None);
+
+        let error = root
+            .sysfs()
+            .bind("ds3231", 0x68, || {}, Duration::ZERO)
+            .unwrap_err();
+
+        assert!(matches!(error, BindError::Declared(d) if d.name == "ds1307"));
+        assert!(!root.0.join("i2c-1/new_device").exists());
+    }
+
+    #[test]
+    fn a_chip_is_loaded_then_instantiated_then_waited_for() {
+        let root = Root::new("bind");
+        let loaded = AtomicBool::new(false);
+        let sysfs = root.sysfs();
+        let kernel = {
+            let dir = root.0.clone();
+            std::thread::spawn(move || {
+                // The kernel, once new_device was written.
+                let request = dir.join("i2c-1/new_device");
+                while !request.exists() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let device = dir.join("1-0068");
+                std::fs::create_dir_all(&device).unwrap();
+                std::fs::write(device.join("name"), "ds3231\n").unwrap();
+                let driver = dir.join("drivers/rtc-ds1307");
+                std::fs::create_dir_all(&driver).unwrap();
+                std::os::unix::fs::symlink(&driver, device.join("driver")).unwrap();
+            })
+        };
+
+        let bound = sysfs
+            .bind(
+                "ds3231",
+                0x68,
+                || loaded.store(true, Ordering::SeqCst),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        kernel.join().unwrap();
+
+        assert!(loaded.load(Ordering::SeqCst));
+        assert_eq!(
+            std::fs::read_to_string(root.0.join("i2c-1/new_device")).unwrap(),
+            "ds3231 0x68\n"
+        );
+        assert!(matches!(bound, Bound::Bound(d) if d.driver.as_deref() == Some("rtc-ds1307")));
+    }
+
+    #[test]
+    fn a_chip_no_driver_takes_is_reported() {
+        let root = Root::new("nodriver");
+
+        let error = root
+            .sysfs()
+            .bind("ds3231", 0x68, || {}, Duration::from_millis(100))
+            .unwrap_err();
+
+        assert!(matches!(error, BindError::NoDriver));
+    }
+
+    #[test]
+    fn a_bus_the_kernel_lacks_fails_new_device() {
+        let root = Root::new("nobus");
+        let sysfs = Sysfs::with_root(&root.0, 7);
+
+        let error = sysfs
+            .bind("ds3231", 0x68, || {}, Duration::ZERO)
+            .unwrap_err();
+
+        assert!(matches!(error, BindError::NewDevice(_)));
+    }
+
+    #[test]
+    fn a_missing_bus_device_cannot_be_opened() {
+        assert!(LinuxI2c::open_path("/nonexistent/i2c-42").is_err());
     }
 }
