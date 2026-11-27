@@ -189,8 +189,8 @@ fn main() -> ExitCode {
             }
         }
         if options.dump {
-            println!("  first read:\n{}", hex(&observation.first[..64]));
-            println!("  1.1 s later:\n{}", hex(&observation.second[..64]));
+            println!("  first read:\n{}", hex(&observation.first[..256]));
+            println!("  1.1 s later:\n{}", hex(&observation.second[..256]));
         }
     }
 

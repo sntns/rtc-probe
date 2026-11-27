@@ -127,9 +127,15 @@ pub fn observe(
         .collect()
 }
 
-/// The shortest of `wraps` after which `first` repeats itself, registers
-/// that changed between the two reads excepted (they may change during a
-/// read too: hundredths, seconds).
+/// The shortest of `wraps` after which `first` repeats itself.
+///
+/// Tolerated, as not the chip's layout:
+/// - up to two registers that changed between the two reads, which may
+///   change during a read too (hundredths, seconds);
+/// - in a register file of 32 or more (with RAM), one byte that reads
+///   differently from one pass to the next without changing between the
+///   reads: seen on a real DS1307 module, whose RAM byte 0x15 reads 0xff
+///   and 0x00 on alternate passes.
 pub fn wrap_length(first: &[u8], second: &[u8], wraps: &[usize]) -> Option<usize> {
     if first.iter().all(|b| *b == first[0]) {
         return None;
@@ -138,22 +144,23 @@ pub fn wrap_length(first: &[u8], second: &[u8], wraps: &[usize]) -> Option<usize
         if period * 2 > first.len() {
             return false;
         }
-        let changing = |register: usize| first[register] != second[register];
-        let mut tolerated = 0;
+        let mut changing = 0;
+        let mut unstable = 0;
         for register in 0..period {
             let repeats = first[register..]
                 .iter()
                 .step_by(period)
                 .all(|b| *b == first[register]);
-            if !repeats {
-                if !changing(register) {
-                    return false;
-                }
-                tolerated += 1;
+            if repeats {
+                continue;
+            }
+            if first[register] != second[register] {
+                changing += 1;
+            } else {
+                unstable += 1;
             }
         }
-        // A ticking register or two, not a whole register file.
-        tolerated <= 2
+        changing <= 2 && unstable <= usize::from(period >= 32)
     })
 }
 
@@ -565,12 +572,27 @@ mod tests {
     }
 
     #[test]
-    fn a_register_that_differs_without_changing_breaks_the_wrap() {
+    fn a_register_that_differs_without_changing_breaks_a_short_wrap() {
         let period = 28;
         let mut first: Vec<u8> = (0..READ_LENGTH)
             .map(|i| (i % period) as u8 * 5 + 2)
             .collect();
         first[period + 7] = 0xee;
+        let second = first.clone();
+        assert_eq!(wrap_length(&first, &second, &[28, 64]), None);
+    }
+
+    #[test]
+    fn one_unstable_byte_is_tolerated_in_ram_not_two() {
+        let period = 64;
+        let mut first: Vec<u8> = (0..READ_LENGTH)
+            .map(|i| ((i % period) as u8).wrapping_mul(5).wrapping_add(2))
+            .collect();
+        first[period + 0x15] = 0x00;
+        let second = first.clone();
+        assert_eq!(wrap_length(&first, &second, &[28, 64]), Some(64));
+
+        first[period + 0x20] = 0x00;
         let second = first.clone();
         assert_eq!(wrap_length(&first, &second, &[28, 64]), None);
     }
@@ -767,6 +789,53 @@ mod tests {
             probe_one(chip, 0x51),
             Finding::Unknown { wrap: Some(28), .. }
         ));
+    }
+
+    /// A DS1307 module on a Raspberry Pi 3 (bus 1, 0x68), its 64 registers
+    /// as read at 09:46:26 UTC (control 0x93: OUT, SQWE, 32.768 kHz). Its RAM
+    /// byte 0x15 reads 0xff and 0x00 on alternate passes.
+    const REAL_DS1307: [u8; 64] = [
+        0x26, 0x46, 0x09, 0x06, 0x27, 0x11, 0x26, 0x93, 0xff, 0xbf, 0xfe, 0xff, 0xff, 0xff, 0xdf,
+        0xfe, 0xff, 0x77, 0xff, 0xbf, 0xff, 0xff, 0xef, 0xfe, 0xff, 0xfb, 0xff, 0xff, 0xff, 0xff,
+        0xdf, 0xff, 0x80, 0x04, 0x00, 0x08, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+        0x00, 0x00, 0x04, 0x80, 0x60, 0x00, 0x00, 0x80, 0x10, 0x08, 0x00, 0x00, 0x22, 0x00, 0x00,
+        0x00, 0x00, 0x14, 0x20,
+    ];
+
+    /// Its registers read from 0x00 as it returns them: byte 0x15 of odd
+    /// passes 0x00.
+    fn ds1307_read(seconds: u8) -> Vec<u8> {
+        let mut read: Vec<u8> = REAL_DS1307
+            .iter()
+            .copied()
+            .cycle()
+            .take(READ_LENGTH)
+            .collect();
+        for pass in (0..READ_LENGTH / 64).filter(|p| p % 2 == 1) {
+            read[pass * 64 + 0x15] = 0x00;
+        }
+        for pass in 0..READ_LENGTH / 64 {
+            read[pass * 64] = seconds;
+        }
+        read
+    }
+
+    #[test]
+    fn a_real_ds1307_is_identified() {
+        let observation = Observation {
+            address: 0x68,
+            first: ds1307_read(0x26),
+            second: ds1307_read(0x27),
+        };
+
+        let Finding::Chip(found) = identify(&observation) else {
+            panic!("{:?}", identify(&observation))
+        };
+
+        assert_eq!(found.chip, "DS1307");
+        assert_eq!(found.confidence, Confidence::Certain);
+        assert_eq!(found.oscillator, Oscillator::Running);
+        assert_eq!(found.wrap, Some(64));
     }
 
     /// A bus shared with the wait closure, which ticks it.
