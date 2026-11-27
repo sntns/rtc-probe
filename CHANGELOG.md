@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.2 - 2026-11-27
+
 Validated on two DS1307 modules on a Raspberry Pi 3.
 
 - **Fixed:** a register file of 32 or more registers (with RAM) may have one byte that reads differently from one pass to the next. The DS1307 module's RAM byte 0x15 reads 0xff and 0x00 on alternate passes, which hid its 64 registers and left it unidentified.
