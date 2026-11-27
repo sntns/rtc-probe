@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Validated, from a Raspberry Pi's initramfs, on a PCF2127 and on DS1307 modules, with and without a battery.
+
+- **Fixed:** a chip that flags its time as invalid (oscillator stopped, battery out, never set) was not identified when its time registers held garbage. A PCF2127 after a power cut without a battery has hours 0x0b, day and month 0. The time's BCD ranges are now checked only when the chip does not flag its time; a flagged chip needs its documented register count.
+- **Changed:** DS1307 and DS1338 are one entry, `DS1307/DS1338`, bound as `ds1338`. No read tells them apart once the DS1338's OSF is cleared, and some DS1307 modules do set that bit. The ds1338 driver reads OSF, which a genuine DS1307 always reads as 0.
+- **Tests:** the PCF2127 after a power cut, a halted DS1307, and a flagged chip with an undocumented register count.
+
 ## 0.1.2 - 2026-11-27
 
 Validated on two DS1307 modules on a Raspberry Pi 3.

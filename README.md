@@ -41,7 +41,7 @@ For every address where a known RTC can answer (0x32, 0x51, 0x52, 0x68, 0x6f), r
    | DS1307, RV-3028 | 64 |
 
    That length tells most chips apart even when the oscillator is stopped.
-2. **Datasheet invariants.** Bits documented as always 0, BCD ranges, a plausible DS3231 temperature, the RV-8803 one-hot weekday and register mirror, the DS1338 OSF bit.
+2. **Datasheet invariants.** Bits documented as always 0, a plausible DS3231 temperature, the RV-8803 one-hot weekday and register mirror, and BCD ranges of the time. The BCD ranges are checked only when the chip does not flag its time as invalid: a chip that lost its time holds garbage there.
 3. **Ticking.** The seconds register (at its chip-specific address) must have advanced by one or two seconds between the reads. This rejects EEPROMs and other devices that share the addresses.
 
 Each finding gets a confidence:
@@ -50,6 +50,8 @@ Each finding gets a confidence:
 |---|---|
 | **certain** | Documented register count and invariants match, and the seconds tick. |
 | **probable** | Documented register count and invariants match, but the seconds do not tick: the oscillator is stopped. Typical of a new chip that was never set, or a dead battery. |
+
+A chip that flags its time as invalid (its OSF, OS, VL... bit set) must have its documented register count to be identified.
 | **possible** | The datasheet does not document the register count. The invariants match and the seconds tick. |
 
 rtc-probe also reports the chip's own "time invalid" flag (OSF, OS, VL, PORF, V2F, OSCRUN).
@@ -60,7 +62,7 @@ rtc-probe also reports the chip's own "time invalid" flag (OSF, OS, VL, PORF, V2
 
 | Address | Chips |
 |---|---|
-| 0x68 | DS1307, DS1338, DS1337, DS1339, DS3231, DS3232*, PCF8523, BQ32000* |
+| 0x68 | DS1307/DS1338, DS1337, DS1339, DS3231, DS3232*, PCF8523, BQ32000* |
 | 0x6f | MCP7940N / MCP7941x |
 | 0x51 | PCF2127 / PCF2129 / PCA2129, PCF85063A, PCF85063TP, PCF8563*, PCF85263A / PCF85363A, RV-3032-C7 |
 | 0x52 | RV-3028-C7 |

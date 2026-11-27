@@ -107,64 +107,12 @@ use Integrity::*;
 /// Every chip known, by address.
 pub const CHIPS: &[Chip] = &[
     // 0x68: the Dallas/Maxim family and its look-alikes.
+    // One entry for both: their registers differ only by the DS1338's OSF
+    // (control bit 5), which a DS1307 always reads 0 and some DS1307
+    // modules do set, and which no read tells apart once cleared. The
+    // ds1338 driver reads OSF: on a DS1307, that is a bit always 0.
     Chip {
-        name: "DS1307",
-        address: 0x68,
-        device: "ds1307",
-        module: "rtc-ds1307",
-        wrap: Some(64),
-        wrap_confirmed: true,
-        seconds: (0x00, 0x7f),
-        fraction: None,
-        checks: &[
-            Zero {
-                register: 0x01,
-                mask: 0x80,
-            },
-            Zero {
-                register: 0x03,
-                mask: 0xf8,
-            },
-            Zero {
-                register: 0x04,
-                mask: 0xc0,
-            },
-            Zero {
-                register: 0x05,
-                mask: 0xe0,
-            },
-            // Control: OUT 0 0 SQWE 0 0 RS1 RS0.
-            Zero {
-                register: 0x07,
-                mask: 0x6c,
-            },
-            Bcd {
-                register: 0x01,
-                mask: 0x7f,
-                min: 0,
-                max: 59,
-            },
-            Bcd {
-                register: 0x04,
-                mask: 0x3f,
-                min: 1,
-                max: 31,
-            },
-            Bcd {
-                register: 0x05,
-                mask: 0x1f,
-                min: 1,
-                max: 12,
-            },
-        ],
-        // CH: the clock is halted (set at first power-up).
-        integrity: &[StoppedWhenSet {
-            register: 0x00,
-            bit: 7,
-        }],
-    },
-    Chip {
-        name: "DS1338",
+        name: "DS1307/DS1338",
         address: 0x68,
         device: "ds1338",
         module: "rtc-ds1307",
@@ -189,16 +137,10 @@ pub const CHIPS: &[Chip] = &[
                 register: 0x05,
                 mask: 0xe0,
             },
-            // Control: OUT 0 OSF SQWE 0 0 RS1 RS0, OSF set: what tells it
-            // from a DS1307 (whose bit 5 always reads 0).
+            // Control: OUT 0 OSF SQWE 0 0 RS1 RS0.
             Zero {
                 register: 0x07,
                 mask: 0x4c,
-            },
-            Equal {
-                register: 0x07,
-                mask: 0x20,
-                value: 0x20,
             },
             Bcd {
                 register: 0x01,
@@ -206,7 +148,20 @@ pub const CHIPS: &[Chip] = &[
                 min: 0,
                 max: 59,
             },
+            Bcd {
+                register: 0x04,
+                mask: 0x3f,
+                min: 1,
+                max: 31,
+            },
+            Bcd {
+                register: 0x05,
+                mask: 0x1f,
+                min: 1,
+                max: 12,
+            },
         ],
+        // CH: the clock is halted (set at first power-up); OSF.
         integrity: &[
             StoppedWhenSet {
                 register: 0x00,

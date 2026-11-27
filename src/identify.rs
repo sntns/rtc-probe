@@ -216,17 +216,28 @@ pub fn matches(
         (Some(_), None) if chip.wrap_confirmed => return None,
         _ => false,
     };
+    // A chip that flags its time as invalid (oscillator stopped, battery
+    // out, never set) holds whatever its registers reset to, or garbage:
+    // only its structure is checked then, not its time's values.
+    let flagged = chip
+        .integrity
+        .iter()
+        .any(|i| stopped(i, &observation.first) || stopped(i, &observation.second));
+    if flagged && !documented {
+        return None;
+    }
     let both = [&observation.first, &observation.second];
     if !chip
         .checks
         .iter()
+        .filter(|c| !(flagged && matches!(c, Check::Bcd { .. })))
         .all(|c| both.iter().all(|registers| check(c, registers)))
     {
         return None;
     }
     let (register, mask) = chip.seconds;
     let seconds = usize::from(register);
-    if bcd(observation.first[seconds] & mask).map_or(true, |s| s > 59) {
+    if !flagged && bcd(observation.first[seconds] & mask).map_or(true, |s| s > 59) {
         return None;
     }
     let ticking = ticked(
@@ -234,10 +245,6 @@ pub fn matches(
         observation.second[seconds],
         mask,
     );
-    let flagged = chip
-        .integrity
-        .iter()
-        .any(|i| stopped(i, &observation.second));
     let confidence = match (documented, ticking) {
         (true, true) => Confidence::Certain,
         (true, false) => Confidence::Probable,
@@ -832,7 +839,7 @@ mod tests {
             panic!("{:?}", identify(&observation))
         };
 
-        assert_eq!(found.chip, "DS1307");
+        assert_eq!(found.chip, "DS1307/DS1338");
         assert_eq!(found.confidence, Confidence::Certain);
         assert_eq!(found.oscillator, Oscillator::Running);
         assert_eq!(found.wrap, Some(64));
@@ -861,9 +868,73 @@ mod tests {
             panic!()
         };
 
-        assert_eq!(found.chip, "DS1307");
+        assert_eq!(found.chip, "DS1307/DS1338");
         assert_eq!(found.confidence, Confidence::Certain);
         assert_eq!(found.oscillator, Oscillator::Running);
+    }
+
+    /// The PCF2127 module after a power cut without a battery, read at
+    /// 11:05 UTC: OSF set, Control_1 back to its reset 0x08, the time
+    /// garbage (hours 0x0b, day and month 0) - but its seconds tick.
+    const REAL_PCF2127_LOST: [u8; 28] = [
+        0x08, 0x00, 0x04, 0x95, 0x06, 0x0b, 0x00, 0x00, 0x00, 0x01, 0xc0, 0xc6, 0xa0, 0x81, 0x80,
+        0x00, 0x03, 0x00, 0x08, 0x40, 0x00, 0x0a, 0x10, 0x00, 0x02, 0x08, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_real_pcf2127_that_lost_its_time_is_identified_and_not_trusted() {
+        let chip = FakeChip {
+            registers: REAL_PCF2127_LOST.to_vec(),
+            wrap_to: 0,
+            seconds: Some((0x03, 0x7f)),
+            running: true,
+        };
+
+        let Finding::Chip(found) = probe_one(chip, 0x51) else {
+            panic!()
+        };
+
+        assert_eq!(found.chip, "PCF2127/PCF2129");
+        assert_eq!(found.confidence, Confidence::Certain);
+        assert_eq!(found.oscillator, Oscillator::Stopped);
+    }
+
+    #[test]
+    fn a_halted_ds1307_with_garbage_is_probable() {
+        // CH set, not ticking, the date out of range.
+        let mut registers = REAL_DS1307_BATTERY.to_vec();
+        registers[0x00] = 0x80;
+        registers[0x04] = 0x00;
+        registers[0x05] = 0x00;
+        let chip = FakeChip {
+            registers,
+            wrap_to: 0,
+            seconds: Some((0x00, 0x7f)),
+            running: false,
+        };
+
+        let Finding::Chip(found) = probe_one(chip, 0x68) else {
+            panic!()
+        };
+
+        assert_eq!(found.chip, "DS1307/DS1338");
+        assert_eq!(found.confidence, Confidence::Probable);
+        assert_eq!(found.oscillator, Oscillator::Stopped);
+    }
+
+    #[test]
+    fn a_flagged_chip_needs_its_documented_wrap() {
+        // A PCF8563 (undocumented wrap) with VL set and its time garbage:
+        // nothing documented vouches for it.
+        let mut chip = FakeChip::new(16, 0);
+        for (i, r) in chip.registers.iter_mut().enumerate() {
+            *r = (i as u8).wrapping_mul(29).wrapping_add(3);
+        }
+        chip.registers[0x02] = 0x80 | 0x12;
+        chip.registers[0x07] = 0x00;
+        chip.seconds = Some((0x02, 0x7f));
+
+        assert!(matches!(probe_one(chip, 0x51), Finding::Unknown { .. }));
     }
 
     /// A bus shared with the wait closure, which ticks it.
